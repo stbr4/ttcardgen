@@ -19,7 +19,9 @@ import wand.font
 DEFAULT_GRAVITY = "center"
 DEFAULT_RESIZE = True
 DEFAULT_BORDER = 20
+DEFAULT_FONT_SIZE = 20
 DEFAULT_BORDER_COLOUR = "black"
+DEFAULT_TEXT_COLOUR = "black"
 
 DEFAULT_SETTINGS = """
 [Settings]
@@ -33,25 +35,31 @@ DEFAULTCFG = """
 #template: templates/item.cfg
 #background: card_background.png
 #backside: card_backside.png
-border: 20
-border_colour: black
+#border: 20
+#border_colour: black
 #image: items/fork.png
 #title: A Fork
 #text: Use this to eat spaghetti
 
 [Image]
 #area: x y width height
-resize: true
+#resize: true
 
 [Title]
 #area: x y width height
 #font: fonts/titlefont.ttf
-gravity: center
+#font_size: 20
+#font_colour: black
+#font_border_colour: black
+#gravity: center
 
 [Text]
 #area: x y width height
 #font: fonts/textfont.ttf
-gravity: center
+#font_size: 20
+#font_colour: black
+#font_border_colour: black
+#gravity: center
 
 [DEFAULT]
 # these settings apply to all sections (can be overridden in section)
@@ -236,11 +244,16 @@ class Card:
         if "font" in cfg_section:
             d.font = cfg_section["font"]
 
-        if "font_size" in cfg_section:
-            try:
-                d.font_size = cfg_section.getint("font_size")
-            except ValueError as e:
-                raise CardConfigError("'font_size' must be a number") from e
+        try:
+            d.font_size = cfg_section.getint("font_size", fallback=DEFAULT_FONT_SIZE)
+        except ValueError as e:
+            raise CardConfigError("'font_size' must be a number") from e
+
+        try:
+            d.fill_color = wand.color.Color(cfg_section.get("font_colour", DEFAULT_TEXT_COLOUR))
+            d.stroke_color = wand.color.Color(cfg_section.get("font_border_colour", DEFAULT_TEXT_COLOUR))
+        except ValueError as e:
+            raise CardConfigError("invalid 'font_colour'") from e
 
         d.gravity = cfg_section.get("gravity", DEFAULT_GRAVITY)
         desc = Utils.word_wrap(img, d, text)
@@ -313,7 +326,11 @@ class CardConfig:
 
     @staticmethod
     def expand_paths(config, relpath, settings=settings):
-        cfg = config["Card"]
+        try:
+            cfg = config["Card"]
+        except KeyError as e:
+            raise CardConfigError("missing config section: 'Card'")
+
         CardConfig.expand_paths_helper(cfg, ["background", "backside"], [relpath])
 
         imagekeys = list(filter(lambda x: x.startswith('image'), cfg.keys()))
@@ -458,6 +475,10 @@ if __name__ == '__main__':
         cardcfg.load(args.config)
         c = gencard(cardcfg)
         c.save(args.output)
+
+    except CardConfigError as e:
+        print("Config Error: %s" % e)
+        sys.exit(1)
 
     except CardError as e:
         print("Error: %s" % e)
