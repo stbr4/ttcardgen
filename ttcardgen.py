@@ -304,6 +304,11 @@ class CardConfig:
         self.cfg.read_dict(templatecfg)
         self.cfg.read_dict(cardconfig)
 
+    def __str__(self):
+        buf = io.StringIO()
+        self.cfg.write(buf)
+        return buf.getvalue()
+
     @staticmethod
     def str2area(txt):
         try:
@@ -473,6 +478,7 @@ if __name__ == '__main__':
     try:
         cardcfg = CardConfig()
         cardcfg.load(args.config)
+        printdebug(cardcfg)
         c = gencard(cardcfg)
         c.save(args.output)
 
