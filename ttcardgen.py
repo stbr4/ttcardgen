@@ -44,15 +44,11 @@ DEFAULTCFG = """
 [Image]
 #area: x y width height
 #resize: true
+#gravity: center
 #rotate: 30.6
 
 [Title]
-#area: x y width height
-#font: fonts/titlefont.ttf
-#font_size: 20
-#font_colour: black
-#font_border_colour: black
-#gravity: center
+# Title accepts the same options as Text
 
 [Text]
 #area: x y width height
@@ -61,6 +57,8 @@ DEFAULTCFG = """
 #font_colour: black
 #font_border_colour: black
 #gravity: center
+# the area is rotated around its center
+#rotate: 30.6
 
 [DEFAULT]
 # these settings apply to all sections (can be overridden in section)
@@ -264,11 +262,30 @@ class Card:
         except ValueError as e:
             raise CardConfigError("invalid 'font_colour'") from e
 
+        try:
+            rotate = cfg_section.getfloat("rotate", fallback=None)
+        except ValueError as e:
+            raise CardConfigError("'rotate' must be a real number") from e
+
         d.gravity = cfg_section.get("gravity", DEFAULT_GRAVITY)
-        desc = Utils.word_wrap(img, d, text)
-        d.text(0, 0, desc)
+
+        wrapped_text = Utils.word_wrap(img, d, text)
+
+        printdebug("font_size: %s" % d.font_size)
+        d.text(0, 0, wrapped_text)
         d.draw(img)
-        self._image.composite(img, self._border + area.x, self._border + area.y)
+
+        comp_x = self._border + area.x
+        comp_y = self._border + area.y
+
+        if rotate is not None:
+            img.rotate(rotate)
+            # rotate around center
+            comp_x += int((area.width - img.width)/2)
+            comp_y += int((area.height - img.height)/2)
+            printdebug("rotate %s %sx%s" % (rotate, comp_x, comp_y))
+
+        self._image.composite(img, comp_x, comp_y)
 
     def save(self, filename):
         self._image.format = 'png'
