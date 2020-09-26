@@ -210,7 +210,8 @@ class Card:
         return image
 
     def loadimage(self, filename, cfg_section):
-        self.mergeimage(self._new_image(filename=filename), cfg_section)
+        if len(filename) != 0:
+            self.mergeimage(self._new_image(filename=filename), cfg_section)
 
     def mergeimage(self, image, cfg_section):
         try:
@@ -387,9 +388,9 @@ class CardConfig:
     @staticmethod
     def expand_paths_helper(cfg, keys, searchpaths):
         for k in keys:
-            path = cfg.get(k, None)
+            path = cfg.get(k, "")
 
-            if path is None or os.path.isabs(path):
+            if len(path) == 0 or os.path.isabs(path):
                 continue
 
             abspath = CardConfig.find_file(path, searchpaths)
