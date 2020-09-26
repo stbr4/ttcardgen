@@ -44,6 +44,7 @@ DEFAULTCFG = """
 [Image]
 #area: x y width height
 #resize: true
+#rotate: 30.6
 
 [Title]
 #area: x y width height
@@ -225,6 +226,14 @@ class Card:
             resize = cfg_section.getboolean("resize", fallback=DEFAULT_RESIZE)
         except ValueError as e:
             raise CardConfigError("'resize' must be a boolean") from e
+
+        try:
+            rotate = cfg_section.getfloat("rotate", fallback=None)
+        except ValueError as e:
+            raise CardConfigError("'rotate' must be a real number") from e
+
+        if rotate is not None:
+            img.rotate(rotate)
 
         if resize:
             img.transform(resize="%dx%d" % (area.width, area.height))
