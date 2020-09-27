@@ -18,6 +18,7 @@ import wand.font
 
 DEFAULT_GRAVITY = "center"
 DEFAULT_RESIZE = True
+DEFAULT_TRIM = True
 DEFAULT_BORDER = 20
 DEFAULT_FONT_SIZE = 20
 DEFAULT_BORDER_COLOUR = "black"
@@ -44,6 +45,7 @@ DEFAULTCFG = """
 [Image]
 #area: x y width height
 #resize: true
+#trim: true
 #gravity: center
 #rotate: 30.6
 
@@ -227,12 +229,20 @@ class Card:
             raise CardConfigError("'resize' must be a boolean") from e
 
         try:
+            trim = cfg_section.getboolean("trim", fallback=DEFAULT_TRIM)
+        except ValueError as e:
+            raise CardConfigError("'trim' must be a boolean") from e
+
+        try:
             rotate = cfg_section.getfloat("rotate", fallback=None)
         except ValueError as e:
             raise CardConfigError("'rotate' must be a real number") from e
 
         if rotate is not None:
             img.rotate(rotate)
+
+        if trim:
+            img.trim(color=None)
 
         if resize:
             img.transform(resize="%dx%d" % (area.width, area.height))
