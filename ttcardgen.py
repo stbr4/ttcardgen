@@ -241,6 +241,10 @@ class Card:
         self._image.composite(canvas, self._border + area.x, self._border + area.y)
 
     def text(self, text, cfg_section):
+        text = text.strip()
+        if len(text) == 0:
+            return
+
         try:
             area = CardConfig.str2area(cfg_section["area"])
         except KeyError as e:
