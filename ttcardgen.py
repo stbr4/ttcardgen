@@ -41,6 +41,8 @@ DEFAULTCFG = """
 #image: items/fork.png
 #title: A Fork
 #text: Use this to eat spaghetti
+# use pango markup to render text
+#text: PANGO:Use <b>this</b> to eat <i>spaghetti</i>
 
 [Image]
 #area: x y width height
@@ -55,12 +57,15 @@ DEFAULTCFG = """
 [Text]
 #area: x y width height
 #font: fonts/textfont.ttf
+# pango can only use installed fonts
+#font: DejaVu Serif
 #font_size: 20
 #font_colour: black
 #font_border_colour: black
 #gravity: center
 # the area is rotated around its center
 #rotate: 30.6
+
 
 [DEFAULT]
 # these settings apply to all sections (can be overridden in section)
@@ -302,6 +307,62 @@ class Card:
 
         self._image.composite(img, comp_x, comp_y)
 
+    def pango(self, text, cfg_section):
+        text = text.strip()
+        if len(text) == 0:
+            return
+
+        try:
+            area = CardConfig.str2area(cfg_section["area"])
+        except KeyError as e:
+            raise CardConfigError("'area' undefined") from e
+
+        span = cfg_section.get("span", "")
+
+        span_opts = []
+        if "font" in cfg_section:
+            span_opts.append("font=\"%s\"" % cfg_section.get("font"))
+        try:
+            span_opts.append("size=\"%i\"" % (cfg_section.getfloat("font_size", fallback=DEFAULT_FONT_SIZE) * 1000))
+        except ValueError as e:
+            raise CardConfigError("'font_size' must be a real number") from e
+        span_opts.append("foreground=\"%s\"" % cfg_section.get("font_colour", DEFAULT_TEXT_COLOUR))
+
+        try:
+            rotate = cfg_section.getfloat("rotate", fallback=None)
+        except ValueError as e:
+            raise CardConfigError("'rotate' must be a real number") from e
+
+        gravity = cfg_section.get("gravity", DEFAULT_GRAVITY)
+        if gravity.endswith("east"):
+            pangogravity = "west"
+        elif gravity.endswith("west"):
+            pangogravity = "east"
+        else:
+            pangogravity = "center"
+
+        pangotext = ''.join(["pango:<span ", ' '.join(span_opts), ">", text, "</span>"])
+        printdebug(pangotext)
+        pangoimg = self._new_image()
+        pangoimg.gravity = pangogravity
+        pangoimg.read(filename=pangotext, width=area.width, height=area.height, background="transparent")
+        pangoimg.trim(color=None)
+
+        img = self._new_image(width=area.width, height=area.height)
+        img.composite(pangoimg, gravity=gravity)
+
+        comp_x = self._border + area.x
+        comp_y = self._border + area.y
+
+        if rotate is not None:
+            img.rotate(rotate)
+            # rotate around center
+            comp_x += int((area.width - img.width)/2)
+            comp_y += int((area.height - img.height)/2)
+            printdebug("rotate %s %sx%s" % (rotate, comp_x, comp_y))
+
+        self._image.composite(img, comp_x, comp_y)
+
     def save(self, filename):
         self._image.format = 'png'
         self._image.resolution = self._resolution
@@ -467,11 +528,19 @@ def gencard(cfg):
         try:
             if k.startswith("title") or k.startswith("text"):
                 printverbose("adding text: %s" % k)
-                card.text(cfg["Card"][k], cfg[k.capitalize()])
+                text = cfg["Card"][k]
+                if text.startswith("PANGO:"):
+                    card.pango(text[6:], cfg[k.capitalize()])
+                else:
+                    card.text(cfg["Card"][k], cfg[k.capitalize()])
 
             elif k.startswith("image"):
                 printverbose("adding image: %s" % k)
                 card.loadimage(cfg["Card"][k], cfg[k.capitalize()])
+
+            elif k.startswith("pango"):
+                printverbose("adding pango: %s" % k)
+                card.pango(cfg["Card"][k], cfg[k.capitalize()])
 
         except CardError as e:
             raise CardError("%s: %s" % (k, e)) from e
