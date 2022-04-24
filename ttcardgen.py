@@ -164,6 +164,7 @@ class Card:
             width=self._width + 2 * self._border,
             height=canvasheight,
             background=self._border_colour,
+            units=bgimg.units,
             resolution=bgimg.resolution,
         )
 
@@ -343,7 +344,7 @@ class Card:
 
         pangotext = ''.join(["pango:<span ", ' '.join(span_opts), ">", text, "</span>"])
         printdebug(pangotext)
-        pangoimg = self._new_image()
+        pangoimg = self._new_image(resolution=(300.0, 300.0))
         pangoimg.gravity = pangogravity
         pangoimg.read(filename=pangotext, width=area.width, height=area.height, background="transparent")
         pangoimg.trim(color=None)
