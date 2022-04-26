@@ -1,9 +1,10 @@
 #!/usr/bin/python3
 
+from typing import Optional
 from dataclasses import dataclass
 from textwrap import wrap
 
-import configparser
+from configparser import ConfigParser, SectionProxy
 import argparse
 
 import os
@@ -73,8 +74,8 @@ DEFAULTCFG = """
 """
 
 
-settings = configparser.ConfigParser()
-settings.read_string(DEFAULT_SETTINGS)
+global_settings = ConfigParser()
+global_settings.read_string(DEFAULT_SETTINGS)
 
 
 class CardError(Exception):
@@ -89,7 +90,7 @@ class CardFileError(CardError):
     pass
 
 
-printlevel = 1
+printlevel: int = 1
 """
 0 - only errors
 1 - info
@@ -97,21 +98,22 @@ printlevel = 1
 3 - debug
 """
 
-def printerror(msg):
+
+def printerror(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
-def printinfo(msg):
+def printinfo(msg: str) -> None:
     if printlevel >= 1:
         print(msg)
 
 
-def printverbose(msg):
+def printverbose(msg: str) -> None:
     if printlevel >= 2:
         print(msg)
 
 
-def printdebug(msg):
+def printdebug(msg: str) -> None:
     if printlevel >= 3:
         print(msg)
 
@@ -124,272 +126,26 @@ class Area:
     height: int
 
 
-class Card:
-
-    def __init__(self, cfg):
-        imgpath = cfg.get("background", None)
-        if imgpath is None or imgpath == '':
-            raise CardConfigError("background image not configured")
-
-        bgimg = self._new_image(filename=imgpath)
-
-        imgpath = cfg.get("backside", None)
-        if imgpath is None or imgpath == '':
-            backimg = None
-        else:
-            backimg = self._new_image(filename=imgpath)
-            backimg.rotate(180)
-
-        self._width = bgimg.width
-        self._height = bgimg.height
-        self._resolution = bgimg.resolution
-        self._units = bgimg.units
-        printdebug("background: %sx%s (%sdpi)" % (self._width, self._height, self._resolution))
-
-        try:
-            self._border_colour = wand.color.Color(cfg.get("border_colour", DEFAULT_BORDER_COLOUR))
-        except ValueError as e:
-            raise CardConfigError("invalid 'border_colour'") from e
-
-        try:
-            self._border = cfg.getint("border", fallback=DEFAULT_BORDER)
-        except ValueError as e:
-            raise CardConfigError("'border' must be a number") from e
-
-        canvasheight = self._height + 2 * self._border
-        if backimg is not None:
-            canvasheight = 2 * canvasheight
-
-        self._image = self._new_image(
-            width=self._width + 2 * self._border,
-            height=canvasheight,
-            background=self._border_colour,
-            units=bgimg.units,
-            resolution=bgimg.resolution,
-        )
-
-        self._image.composite(bgimg, self._border, self._border)
-        cutmarks = self._draw_cutmarks()
-        self._image.composite(cutmarks)
-
-        if backimg is not None:
-            if backimg.width != self._width or backimg.height != self._height:
-                backimg.resize(self._width, self._height)
-            self._image.composite(backimg, self._border, self._height + 3 * self._border)
-            self._image.composite(cutmarks, 0, 2 * self._border + self._height)
-
-    def _new_image(self, **kwargs):
-        try:
-            printdebug("new_image: %s" % kwargs)
-            return wand.image.Image(**kwargs)
-        except Exception as e:
-            raise CardError("failed to create image: %s" % e) from e
-
-    def _draw_cutmarks(self):
-        marklen = self._border - 1
-        if marklen <= 0:
-            return
-
-        image = self._new_image(
-            width=self._width + 2 * self._border,
-            height=self._height + 2 * self._border,
-        )
-
-        draw = wand.drawing.Drawing()
-        draw.fill_color = self._border_colour
-        draw.stroke_color = self._border_colour
-        draw.stroke_width = 3
-
-        hor_x = (0, self._border + self._width + 1)
-        hor_y = (self._border - 1, self._border + self._height - 1)
-        vert_x = (self._border - 1, self._border + self._width - 1)
-        vert_y = (0, self._border + self._height + 1)
-
-        for x in hor_x:
-            for y in hor_y:
-                draw.line((x, y), (x + marklen - 1, y))
-
-        for x in vert_x:
-            for y in vert_y:
-                draw.line((x, y), (x, y + marklen - 1))
-
-        draw(image)
-        image.negate(False, 'rgb')
-        return image
-
-    def loadimage(self, filename, cfg_section):
-        if len(filename) != 0:
-            self.mergeimage(self._new_image(filename=filename), cfg_section)
-
-    def mergeimage(self, image, cfg_section):
-        try:
-            area = CardConfig.str2area(cfg_section["area"])
-        except KeyError as e:
-            raise CardConfigError("'area' undefined ") from e
-        canvas = self._new_image(width=area.width, height=area.height)
-        img = image.clone()
-
-        try:
-            resize = cfg_section.getboolean("resize", fallback=DEFAULT_RESIZE)
-        except ValueError as e:
-            raise CardConfigError("'resize' must be a boolean") from e
-
-        try:
-            trim = cfg_section.getboolean("trim", fallback=DEFAULT_TRIM)
-        except ValueError as e:
-            raise CardConfigError("'trim' must be a boolean") from e
-
-        try:
-            rotate = cfg_section.getfloat("rotate", fallback=None)
-        except ValueError as e:
-            raise CardConfigError("'rotate' must be a real number") from e
-
-        if rotate is not None:
-            img.rotate(rotate)
-
-        if trim:
-            img.trim(color=None)
-
-        if resize:
-            img.transform(resize="%dx%d" % (area.width, area.height))
-
-        canvas.composite(img, gravity=cfg_section.get("gravity", DEFAULT_GRAVITY))
-        self._image.composite(canvas, self._border + area.x, self._border + area.y)
-
-    def text(self, text, cfg_section):
-        text = text.strip()
-        if len(text) == 0:
-            return
-
-        try:
-            area = CardConfig.str2area(cfg_section["area"])
-        except KeyError as e:
-            raise CardConfigError("'area' undefined") from e
-
-        img = self._new_image(width=area.width, height=area.height)
-        d = wand.drawing.Drawing()
-
-        if "font" in cfg_section:
-            d.font = cfg_section["font"]
-
-        try:
-            d.font_size = cfg_section.getint("font_size", fallback=DEFAULT_FONT_SIZE)
-        except ValueError as e:
-            raise CardConfigError("'font_size' must be a number") from e
-
-        try:
-            d.fill_color = wand.color.Color(cfg_section.get("font_colour", DEFAULT_TEXT_COLOUR))
-            d.stroke_color = wand.color.Color(cfg_section.get("font_border_colour", DEFAULT_TEXT_COLOUR))
-        except ValueError as e:
-            raise CardConfigError("invalid 'font_colour'") from e
-
-        try:
-            rotate = cfg_section.getfloat("rotate", fallback=None)
-        except ValueError as e:
-            raise CardConfigError("'rotate' must be a real number") from e
-
-        d.gravity = cfg_section.get("gravity", DEFAULT_GRAVITY)
-
-        wrapped_text = Utils.word_wrap(img, d, text)
-
-        printdebug("font_size: %s" % d.font_size)
-        d.text(0, 0, wrapped_text)
-        d.draw(img)
-
-        comp_x = self._border + area.x
-        comp_y = self._border + area.y
-
-        if rotate is not None:
-            img.rotate(rotate)
-            # rotate around center
-            comp_x += int((area.width - img.width)/2)
-            comp_y += int((area.height - img.height)/2)
-            printdebug("rotate %s %sx%s" % (rotate, comp_x, comp_y))
-
-        self._image.composite(img, comp_x, comp_y)
-
-    def pango(self, text, cfg_section):
-        text = text.strip()
-        if len(text) == 0:
-            return
-
-        try:
-            area = CardConfig.str2area(cfg_section["area"])
-        except KeyError as e:
-            raise CardConfigError("'area' undefined") from e
-
-        span = cfg_section.get("span", "")
-
-        span_opts = []
-        if "font" in cfg_section:
-            span_opts.append("font=\"%s\"" % cfg_section.get("font"))
-        try:
-            span_opts.append("size=\"%i\"" % (cfg_section.getfloat("font_size", fallback=DEFAULT_FONT_SIZE) * 1000))
-        except ValueError as e:
-            raise CardConfigError("'font_size' must be a real number") from e
-        span_opts.append("foreground=\"%s\"" % cfg_section.get("font_colour", DEFAULT_TEXT_COLOUR))
-
-        try:
-            rotate = cfg_section.getfloat("rotate", fallback=None)
-        except ValueError as e:
-            raise CardConfigError("'rotate' must be a real number") from e
-
-        gravity = cfg_section.get("gravity", DEFAULT_GRAVITY)
-        if gravity.endswith("east"):
-            pangogravity = "west"
-        elif gravity.endswith("west"):
-            pangogravity = "east"
-        else:
-            pangogravity = "center"
-
-        pangotext = ''.join(["pango:<span ", ' '.join(span_opts), ">", text, "</span>"])
-        printdebug(pangotext)
-        pangoimg = self._new_image(resolution=(300.0, 300.0))
-        pangoimg.gravity = pangogravity
-        pangoimg.read(filename=pangotext, width=area.width, height=area.height, background="transparent")
-        pangoimg.trim(color=None)
-
-        img = self._new_image(width=area.width, height=area.height)
-        img.composite(pangoimg, gravity=gravity)
-
-        comp_x = self._border + area.x
-        comp_y = self._border + area.y
-
-        if rotate is not None:
-            img.rotate(rotate)
-            # rotate around center
-            comp_x += int((area.width - img.width)/2)
-            comp_y += int((area.height - img.height)/2)
-            printdebug("rotate %s %sx%s" % (rotate, comp_x, comp_y))
-
-        self._image.composite(img, comp_x, comp_y)
-
-    def save(self, filename):
-        self._image.format = 'png'
-        self._image.resolution = self._resolution
-        self._image.save(filename=filename)
-
-
 class CardConfig:
 
-    def __init__(self, settings=settings):
+    def __init__(self, settings: ConfigParser = global_settings):
         self.settings = settings
-        self.cfg = configparser.ConfigParser()
+        self.cfg = ConfigParser()
         self.cfg.read_string(DEFAULTCFG)
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: str) -> SectionProxy:
         if not self.cfg.has_section(key):
             raise CardConfigError("missing config section '%s'" % key)
         return self.cfg[key]
 
-    def load(self, filename):
+    def load(self, filename: str) -> None:
         printverbose("load config '%s'" % filename)
 
         cfgpath = os.path.realpath(filename)
         if not os.path.isfile(cfgpath):
             raise CardFileError("file not found: %s" % filename)
 
-        cardconfig = configparser.ConfigParser()
+        cardconfig = ConfigParser()
         cardconfig.read(cfgpath)
         CardConfig.expand_paths(cardconfig, os.path.dirname(cfgpath), self.settings)
 
@@ -400,28 +156,28 @@ class CardConfig:
 
         printverbose("using template '%s'" % templatepath)
 
-        templatecfg = configparser.ConfigParser()
+        templatecfg = ConfigParser()
         templatecfg.read(templatepath)
         CardConfig.expand_paths(templatecfg, os.path.dirname(templatepath))
 
         self.cfg.read_dict(templatecfg)
         self.cfg.read_dict(cardconfig)
 
-    def __str__(self):
+    def __str__(self) -> str:
         buf = io.StringIO()
         self.cfg.write(buf)
         return buf.getvalue()
 
     @staticmethod
-    def str2area(txt):
+    def str2area(txt: str) -> Area:
         try:
             a = list(map(lambda x: int(x), txt.split()))
             return Area(a[0], a[1], a[2], a[3])
-        except (ValueError, IndexError) as e:
-            raise CardConfigError("error parsing area: %s" % txt) from e
+        except (ValueError, IndexError) as err:
+            raise CardConfigError("error parsing area: %s" % txt) from err
 
     @staticmethod
-    def find_file(filename, paths):
+    def find_file(filename: str, paths: list[str]) -> Optional[str]:
         if os.path.isabs(filename):
             return filename
 
@@ -433,10 +189,10 @@ class CardConfig:
         return None
 
     @staticmethod
-    def expand_paths(config, relpath, settings=settings):
+    def expand_paths(config: ConfigParser, relpath: str, settings: ConfigParser = global_settings) -> None:
         try:
             cfg = config["Card"]
-        except KeyError as e:
+        except KeyError:
             raise CardConfigError("missing config section: 'Card'")
 
         CardConfig.expand_paths_helper(cfg, ["background", "backside"], [relpath])
@@ -462,9 +218,9 @@ class CardConfig:
                     CardConfig.expand_paths_helper(cfg, ["font"], paths)
 
     @staticmethod
-    def expand_paths_helper(cfg, keys, searchpaths):
+    def expand_paths_helper(cfg_section: SectionProxy, keys: list[str], searchpaths: list[str]):
         for k in keys:
-            path = cfg.get(k, "")
+            path: str = cfg_section.get(k, "")
 
             if len(path) == 0 or os.path.isabs(path):
                 continue
@@ -473,13 +229,261 @@ class CardConfig:
             if abspath is None:
                 raise CardFileError("%s: file not found %s" % (k, path))
 
-            cfg[k] = abspath
+            cfg_section[k] = abspath
+
+
+class Card:
+
+    def __init__(self, cfg: SectionProxy):
+        imgpath = cfg.get("background", None)
+        if imgpath is None or imgpath == '':
+            raise CardConfigError("background image not configured")
+
+        bgimg = self._new_image(filename=imgpath)
+
+        imgpath = cfg.get("backside", None)
+        if imgpath is None or imgpath == '':
+            backimg = None
+        else:
+            backimg = self._new_image(filename=imgpath)
+            backimg.rotate(180)
+
+        self._width = bgimg.width
+        self._height = bgimg.height
+        self._resolution = bgimg.resolution
+        self._units = bgimg.units
+        printdebug("background: %sx%s (%sdpi)" % (self._width, self._height, self._resolution))
+
+        try:
+            self._border_colour = wand.color.Color(cfg.get("border_colour", DEFAULT_BORDER_COLOUR))
+            #self._border_colour_back = wand.color.Color(cfg.get("border_colour_back", self._border_colour))
+        except ValueError as err:
+            raise CardConfigError("invalid 'border_colour'") from err
+
+        try:
+            self._border = cfg.getint("border", fallback=DEFAULT_BORDER)
+        except ValueError as err:
+            raise CardConfigError("'border' must be a number") from err
+
+        canvasheight = self._height + 2 * self._border
+        if backimg is not None:
+            canvasheight = 2 * canvasheight
+
+        self._image = self._new_image(
+            width=self._width + 2 * self._border,
+            height=canvasheight,
+            background=self._border_colour,
+            units=bgimg.units,
+            resolution=bgimg.resolution,
+        )
+
+        self._image.composite(bgimg, self._border, self._border)
+        cutmarks = self._draw_cutmarks()
+        self._image.composite(cutmarks)
+
+        if backimg is not None:
+            if backimg.width != self._width or backimg.height != self._height:
+                backimg.resize(self._width, self._height)
+            self._image.composite(backimg, self._border, self._height + 3 * self._border)
+            self._image.composite(cutmarks, 0, 2 * self._border + self._height)
+
+    @staticmethod
+    def _new_image(**kwargs) -> wand.image.Image:
+        try:
+            printdebug("new_image: %s" % kwargs)
+            return wand.image.Image(**kwargs)
+        except Exception as err:
+            raise CardError("failed to create image: %s" % err) from err
+
+    def _draw_cutmarks(self) -> wand.image.Image:
+        image = self._new_image(
+            width=self._width + 2 * self._border,
+            height=self._height + 2 * self._border,
+        )
+
+        marklen = self._border - 1
+        if marklen <= 0:
+            return image
+
+        draw = wand.drawing.Drawing()
+        draw.fill_color = self._border_colour
+        draw.stroke_color = self._border_colour
+        draw.stroke_width = 3
+
+        hor_x = (0, self._border + self._width + 1)
+        hor_y = (self._border - 1, self._border + self._height - 1)
+        vert_x = (self._border - 1, self._border + self._width - 1)
+        vert_y = (0, self._border + self._height + 1)
+
+        for x in hor_x:
+            for y in hor_y:
+                draw.line((x, y), (x + marklen - 1, y))
+
+        for x in vert_x:
+            for y in vert_y:
+                draw.line((x, y), (x, y + marklen - 1))
+
+        draw(image)
+        image.negate(False, 'rgb')
+        return image
+
+    def loadimage(self, filename: str, cfg_section: SectionProxy) -> None:
+        if len(filename) != 0:
+            self.mergeimage(self._new_image(filename=filename), cfg_section)
+
+    def mergeimage(self, image: wand.image.Image, cfg_section: SectionProxy) -> None:
+        try:
+            area = CardConfig.str2area(cfg_section["area"])
+        except KeyError as err:
+            raise CardConfigError("'area' undefined ") from err
+        canvas = self._new_image(width=area.width, height=area.height)
+        img = image.clone()
+
+        try:
+            resize = cfg_section.getboolean("resize", fallback=DEFAULT_RESIZE)
+        except ValueError as err:
+            raise CardConfigError("'resize' must be a boolean") from err
+
+        try:
+            trim = cfg_section.getboolean("trim", fallback=DEFAULT_TRIM)
+        except ValueError as err:
+            raise CardConfigError("'trim' must be a boolean") from err
+
+        try:
+            rotate = cfg_section.getfloat("rotate", fallback=None)
+        except ValueError as err:
+            raise CardConfigError("'rotate' must be a real number") from err
+
+        if rotate is not None:
+            img.rotate(rotate)
+
+        if trim:
+            img.trim()
+
+        if resize:
+            img.transform(resize="%dx%d" % (area.width, area.height))
+
+        canvas.composite(img, gravity=cfg_section.get("gravity", DEFAULT_GRAVITY))
+        self._image.composite(canvas, self._border + area.x, self._border + area.y)
+
+    def text(self, text: str, cfg_section: SectionProxy) -> None:
+        text = text.strip()
+        if len(text) == 0:
+            return
+
+        try:
+            area = CardConfig.str2area(cfg_section["area"])
+        except KeyError as err:
+            raise CardConfigError("'area' undefined") from err
+
+        img = self._new_image(width=area.width, height=area.height)
+        drawing = wand.drawing.Drawing()
+
+        if "font" in cfg_section:
+            drawing.font = cfg_section["font"]
+
+        try:
+            drawing.font_size = cfg_section.getint("font_size", fallback=DEFAULT_FONT_SIZE)
+        except ValueError as err:
+            raise CardConfigError("'font_size' must be a number") from err
+
+        try:
+            drawing.fill_color = wand.color.Color(cfg_section.get("font_colour", DEFAULT_TEXT_COLOUR))
+            drawing.stroke_color = wand.color.Color(cfg_section.get("font_border_colour", DEFAULT_TEXT_COLOUR))
+        except ValueError as err:
+            raise CardConfigError("invalid 'font_colour'") from err
+
+        try:
+            rotate = cfg_section.getfloat("rotate", fallback=None)
+        except ValueError as err:
+            raise CardConfigError("'rotate' must be a real number") from err
+
+        drawing.gravity = cfg_section.get("gravity", DEFAULT_GRAVITY)
+
+        wrapped_text = Utils.word_wrap(img, drawing, text)
+
+        printdebug("font_size: %s" % drawing.font_size)
+        drawing.text(0, 0, wrapped_text)
+        drawing.draw(img)
+
+        comp_x = self._border + area.x
+        comp_y = self._border + area.y
+
+        if rotate is not None:
+            img.rotate(rotate)
+            # rotate around center
+            comp_x += int((area.width - img.width)/2)
+            comp_y += int((area.height - img.height)/2)
+            printdebug("rotate %s %sx%s" % (rotate, comp_x, comp_y))
+
+        self._image.composite(img, comp_x, comp_y)
+
+    def pango(self, text: str, cfg_section: SectionProxy):
+        text = text.strip()
+        if len(text) == 0:
+            return
+
+        try:
+            area = CardConfig.str2area(cfg_section["area"])
+        except KeyError as err:
+            raise CardConfigError("'area' undefined") from err
+
+        span = cfg_section.get("span", "")
+
+        span_opts = []
+        if "font" in cfg_section:
+            span_opts.append("font=\"%s\"" % cfg_section.get("font"))
+        try:
+            span_opts.append("size=\"%i\"" % (cfg_section.getfloat("font_size", fallback=DEFAULT_FONT_SIZE) * 1000))
+        except ValueError as err:
+            raise CardConfigError("'font_size' must be a real number") from err
+        span_opts.append("foreground=\"%s\"" % cfg_section.get("font_colour", DEFAULT_TEXT_COLOUR))
+
+        try:
+            rotate = cfg_section.getfloat("rotate", fallback=None)
+        except ValueError as err:
+            raise CardConfigError("'rotate' must be a real number") from err
+
+        gravity = cfg_section.get("gravity", DEFAULT_GRAVITY)
+        if gravity.endswith("east"):
+            pangogravity = "west"
+        elif gravity.endswith("west"):
+            pangogravity = "east"
+        else:
+            pangogravity = "center"
+
+        pangotext = ''.join(["pango:<span ", ' '.join(span_opts), ">", text, "</span>"])
+        printdebug(pangotext)
+        pangoimg = self._new_image(resolution=(300.0, 300.0))
+        pangoimg.gravity = pangogravity
+        pangoimg.read(filename=pangotext, width=area.width, height=area.height, background="transparent")
+        pangoimg.trim()
+
+        img = self._new_image(width=area.width, height=area.height)
+        img.composite(pangoimg, gravity=gravity)
+
+        comp_x = self._border + area.x
+        comp_y = self._border + area.y
+
+        if rotate is not None:
+            img.rotate(rotate)
+            # rotate around center
+            comp_x += int((area.width - img.width)/2)
+            comp_y += int((area.height - img.height)/2)
+            printdebug("rotate %s %sx%s" % (rotate, comp_x, comp_y))
+
+        self._image.composite(img, comp_x, comp_y)
+
+    def save(self, filename: str) -> None:
+        self._image.format = 'png'
+        self._image.resolution = self._resolution
+        self._image.save(filename=filename)
 
 
 class Utils:
 
     @staticmethod
-    def word_wrap(image, ctx, text):
+    def word_wrap(image: wand.image.Image, ctx: wand.drawing.Drawing, text: str) -> str:
         """Break long text to multiple lines, and reduce point size
         until all text fits within a bounding box."""
         mutable_message = text
@@ -487,7 +491,7 @@ class Utils:
         maxcolumns = max(map(len, lines))
         iteration_attempts = 100
 
-        def eval_metrics(txt):
+        def eval_metrics(txt: str) -> (int, int):
             """Quick helper function to calculate width/height of text."""
             metrics = ctx.get_font_metrics(image, txt, True)
             return metrics.text_width, metrics.text_height
@@ -516,35 +520,35 @@ class Utils:
         return mutable_message
 
 
-def load_settings():
+def load_settings() -> None:
     cfgpath = os.path.join(os.path.expanduser("~"), ".rpgcardgen.cfg")
     if os.path.isfile(cfgpath):
-        settings.read(cfgpath)
+        global_settings.read(cfgpath)
 
 
-def gencard(cfg):
-    card = Card(cfg["Card"])
+def gencard(config: CardConfig) -> Card:
+    card = Card(config["Card"])
 
-    for k in cfg["Card"].keys():
+    for k in config["Card"].keys():
         try:
             if k.startswith("title") or k.startswith("text"):
                 printverbose("adding text: %s" % k)
-                text = cfg["Card"][k]
+                text = config["Card"][k]
                 if text.startswith("PANGO:"):
-                    card.pango(text[6:], cfg[k.capitalize()])
+                    card.pango(text[6:], config[k.capitalize()])
                 else:
-                    card.text(cfg["Card"][k], cfg[k.capitalize()])
+                    card.text(config["Card"][k], config[k.capitalize()])
 
             elif k.startswith("image"):
                 printverbose("adding image: %s" % k)
-                card.loadimage(cfg["Card"][k], cfg[k.capitalize()])
+                card.loadimage(config["Card"][k], config[k.capitalize()])
 
             elif k.startswith("pango"):
                 printverbose("adding pango: %s" % k)
-                card.pango(cfg["Card"][k], cfg[k.capitalize()])
+                card.pango(config["Card"][k], config[k.capitalize()])
 
-        except CardError as e:
-            raise CardError("%s: %s" % (k, e)) from e
+        except CardError as err:
+            raise CardError("%s: %s" % (k, err)) from err
 
     return card
 
@@ -589,7 +593,7 @@ if __name__ == '__main__':
     try:
         cardcfg = CardConfig()
         cardcfg.load(args.config)
-        printdebug(cardcfg)
+        printdebug(str(cardcfg))
         c = gencard(cardcfg)
         c.save(args.output)
 
@@ -602,5 +606,3 @@ if __name__ == '__main__':
         sys.exit(1)
 
     sys.exit(0)
-
-
