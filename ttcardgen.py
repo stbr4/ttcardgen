@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-
+import collections.abc
 from typing import Optional
 from dataclasses import dataclass
 from textwrap import wrap
@@ -138,30 +138,29 @@ class CardConfig:
             raise CardConfigError("missing config section '%s'" % key)
         return self.cfg[key]
 
-    def load(self, filename: str) -> None:
+    def load(self, filename: str, level: int = 0) -> None:
         printverbose("load config '%s'" % filename)
+        if level > 100:
+            raise CardConfigError('too many templates')
 
         cfgpath = os.path.realpath(filename)
         if not os.path.isfile(cfgpath):
             raise CardFileError("file not found: %s" % filename)
 
-        cardconfig = ConfigParser()
-        cardconfig.read(cfgpath)
-        CardConfig.expand_paths(cardconfig, os.path.dirname(cfgpath), self.settings)
+        config = ConfigParser()
+        config.read(cfgpath)
 
         try:
-            templatepath = cardconfig["Card"]["template"]
+            config_card = config["Card"]
         except KeyError:
-            raise CardConfigError("template undefined")
+            raise CardConfigError("missing config section 'Card' from %s" % filename)
 
-        printverbose("using template '%s'" % templatepath)
+        CardConfig.expand_paths(config, os.path.dirname(cfgpath))
 
-        templatecfg = ConfigParser()
-        templatecfg.read(templatepath)
-        CardConfig.expand_paths(templatecfg, os.path.dirname(templatepath))
+        if (templatepath := config_card.get('template', None)) is not None:
+            self.load(templatepath, level + 1)
 
-        self.cfg.read_dict(templatecfg)
-        self.cfg.read_dict(cardconfig)
+        self.cfg.read_dict(config)
 
     def __str__(self) -> str:
         buf = io.StringIO()
@@ -189,33 +188,24 @@ class CardConfig:
         return None
 
     @staticmethod
-    def expand_paths(config: ConfigParser, relpath: str, settings: ConfigParser = global_settings) -> None:
+    def expand_paths(config: ConfigParser, relpath: str) -> None:
         try:
             cfg = config["Card"]
         except KeyError:
             raise CardConfigError("missing config section: 'Card'")
 
-        CardConfig.expand_paths_helper(cfg, ["background", "backside"], [relpath])
-
-        imagekeys = list(filter(lambda x: x.startswith('image'), cfg.keys()))
-        if len(imagekeys) > 0:
-            paths = [relpath]
-            paths.extend(settings["Settings"]["image_paths"].split())
-            CardConfig.expand_paths_helper(cfg, imagekeys, paths)
-
-        if "template" in cfg:
-            paths = [relpath]
-            paths.extend(settings["Settings"]["template_paths"].split())
-            CardConfig.expand_paths_helper(cfg, ["template"], paths)
+        filekeys = ['template', 'background', 'backside']
+        filekeys.extend(list(filter(lambda x: x.startswith('image'), cfg.keys())))
+        for key in filekeys:
+            path: str = cfg.get(key, "")
+            if len(path) > 0:
+                cfg[key] = os.path.join(relpath, path)
 
         for section in config.sections():
             if section.startswith("Title") or section.startswith("Text"):
-                cfg = config[section]
-                font = cfg.get("font", None)
-                if font is not None and font.endswith(".ttf"):
-                    paths = [relpath]
-                    paths.extend(settings["Settings"]["font_paths"].split())
-                    CardConfig.expand_paths_helper(cfg, ["font"], paths)
+                path = config[section].get("font", "")
+                if len(path) > 0:
+                    config[section]['fong'] = os.path.join(relpath, path)
 
     @staticmethod
     def expand_paths_helper(cfg_section: SectionProxy, keys: list[str], searchpaths: list[str]):
@@ -234,7 +224,14 @@ class CardConfig:
 
 class Card:
 
-    def __init__(self, cfg: SectionProxy):
+    def __init__(self, cardconfig: CardConfig):
+        self.cardconfig = cardconfig
+
+        try:
+            cfg = cardconfig["Card"]
+        except KeyError:
+            raise CardConfigError("missing config section: 'Card'")
+
         imgpath = cfg.get("background", None)
         if imgpath is None or imgpath == '':
             raise CardConfigError("background image not configured")
@@ -327,30 +324,37 @@ class Card:
         image.negate(False, 'rgb')
         return image
 
-    def loadimage(self, filename: str, cfg_section: SectionProxy) -> None:
-        if len(filename) != 0:
-            self.mergeimage(self._new_image(filename=filename), cfg_section)
+    def merge_image(self, key: str) -> None:
+        filename = self.cardconfig['Card'][key]
+        if len(filename) == 0:
+            return
 
-    def mergeimage(self, image: wand.image.Image, cfg_section: SectionProxy) -> None:
+        printverbose("merge image: %s" % filename)
+
+        # TODO: catch section not found
+        image_settings = self.cardconfig[key.capitalize()]
+
+        image = self._new_image(filename=filename)
+
         try:
-            area = CardConfig.str2area(cfg_section["area"])
+            area = CardConfig.str2area(image_settings["area"])
         except KeyError as err:
             raise CardConfigError("'area' undefined ") from err
         canvas = self._new_image(width=area.width, height=area.height)
-        img = image.clone()
+        img = image.clone()  # TODO: why?
 
         try:
-            resize = cfg_section.getboolean("resize", fallback=DEFAULT_RESIZE)
+            resize = image_settings.getboolean("resize", fallback=DEFAULT_RESIZE)
         except ValueError as err:
             raise CardConfigError("'resize' must be a boolean") from err
 
         try:
-            trim = cfg_section.getboolean("trim", fallback=DEFAULT_TRIM)
+            trim = image_settings.getboolean("trim", fallback=DEFAULT_TRIM)
         except ValueError as err:
             raise CardConfigError("'trim' must be a boolean") from err
 
         try:
-            rotate = cfg_section.getfloat("rotate", fallback=None)
+            rotate = image_settings.getfloat("rotate", fallback=None)
         except ValueError as err:
             raise CardConfigError("'rotate' must be a real number") from err
 
@@ -363,46 +367,48 @@ class Card:
         if resize:
             img.transform(resize="%dx%d" % (area.width, area.height))
 
-        canvas.composite(img, gravity=cfg_section.get("gravity", DEFAULT_GRAVITY))
+        canvas.composite(img, gravity=image_settings.get("gravity", DEFAULT_GRAVITY))
         self._image.composite(canvas, self._border + area.x, self._border + area.y)
 
-    def text(self, text: str, cfg_section: SectionProxy) -> None:
-        text = text.strip()
+    def text(self, key: str) -> None:
+        text = self.cardconfig['Card'][key].strip()
         if len(text) == 0:
             return
 
+        text_settings = self.cardconfig[key.capitalize()]
+
         try:
-            area = CardConfig.str2area(cfg_section["area"])
+            area = CardConfig.str2area(text_settings['area'])
         except KeyError as err:
             raise CardConfigError("'area' undefined") from err
 
         img = self._new_image(width=area.width, height=area.height)
         drawing = wand.drawing.Drawing()
 
-        if "font" in cfg_section:
-            drawing.font = cfg_section["font"]
+        if 'font' in text_settings:
+            drawing.font = text_settings['font']
 
         try:
-            drawing.font_size = cfg_section.getint("font_size", fallback=DEFAULT_FONT_SIZE)
+            drawing.font_size = text_settings.getint('font_size', fallback=DEFAULT_FONT_SIZE)
         except ValueError as err:
             raise CardConfigError("'font_size' must be a number") from err
 
         try:
-            drawing.fill_color = wand.color.Color(cfg_section.get("font_colour", DEFAULT_TEXT_COLOUR))
-            drawing.stroke_color = wand.color.Color(cfg_section.get("font_border_colour", DEFAULT_TEXT_COLOUR))
+            drawing.fill_color = wand.color.Color(text_settings.get('font_colour', DEFAULT_TEXT_COLOUR))
+            drawing.stroke_color = wand.color.Color(text_settings.get('font_border_colour', DEFAULT_TEXT_COLOUR))
         except ValueError as err:
             raise CardConfigError("invalid 'font_colour'") from err
 
         try:
-            rotate = cfg_section.getfloat("rotate", fallback=None)
+            rotate = text_settings.getfloat('rotate', fallback=None)
         except ValueError as err:
             raise CardConfigError("'rotate' must be a real number") from err
 
-        drawing.gravity = cfg_section.get("gravity", DEFAULT_GRAVITY)
+        drawing.gravity = text_settings.get('gravity', DEFAULT_GRAVITY)
 
         wrapped_text = Utils.word_wrap(img, drawing, text)
 
-        printdebug("font_size: %s" % drawing.font_size)
+        printdebug('font_size: %s' % drawing.font_size)
         drawing.text(0, 0, wrapped_text)
         drawing.draw(img)
 
@@ -414,7 +420,7 @@ class Card:
             # rotate around center
             comp_x += int((area.width - img.width)/2)
             comp_y += int((area.height - img.height)/2)
-            printdebug("rotate %s %sx%s" % (rotate, comp_x, comp_y))
+            printdebug('rotate %s %sx%s' % (rotate, comp_x, comp_y))
 
         self._image.composite(img, comp_x, comp_y)
 
@@ -527,7 +533,7 @@ def load_settings() -> None:
 
 
 def gencard(config: CardConfig) -> Card:
-    card = Card(config["Card"])
+    card = Card(config)
 
     for k in config["Card"].keys():
         try:
@@ -537,11 +543,11 @@ def gencard(config: CardConfig) -> Card:
                 if text.startswith("PANGO:"):
                     card.pango(text[6:], config[k.capitalize()])
                 else:
-                    card.text(config["Card"][k], config[k.capitalize()])
+                    card.text(k)
 
             elif k.startswith("image"):
                 printverbose("adding image: %s" % k)
-                card.loadimage(config["Card"][k], config[k.capitalize()])
+                card.merge_image(k)
 
             elif k.startswith("pango"):
                 printverbose("adding pango: %s" % k)
